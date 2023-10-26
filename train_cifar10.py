@@ -8,6 +8,10 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
+from torch.distributed import init_process_group, destroy_process_group
 
 import torchvision
 import torchvision.transforms as transforms
@@ -18,6 +22,17 @@ import argparse
 from models import *
 from utils import progress_bar
 
+
+def ddp_setup(rank: int, world_size: int):
+    """
+    Args:
+      rank: Unique identifier of each process
+     world_size: Total number of processes
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
@@ -54,6 +69,8 @@ testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False,
 
 classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 
+
+
 # Model
 print('==> Building model..')
 # net = VGG('VGG19')
@@ -76,9 +93,17 @@ elif args.net=='res101':
 # net = DPN92()
 # net = ShuffleNetG2()
 # net = SENet18()
-net = net.to(device)
+
+#net = net.to(device)
 if device == 'cuda':
-    net = torch.nn.DataParallel(net) # make parallel
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    print(f"Start running basic DDP example on rank {rank}.")
+    device_id = rank % torch.cuda.device_count()
+    model = net.to(device_id);
+    ddp_model = DistributedDataParallel(model, device_ids=[device_id])
+    #dist.init_process_group("NCCL", rank=1, world_size=2)
+    #net = DistributedDataParallel(net) # make parallel
     cudnn.benchmark = True
 
 if args.resume:
@@ -86,6 +111,7 @@ if args.resume:
     print('==> Resuming from checkpoint..')
     assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
     checkpoint = torch.load('./checkpoint/ckpt.t7')
+    
     net.load_state_dict(checkpoint['net'])
     best_acc = checkpoint['acc']
     start_epoch = checkpoint['epoch']
@@ -101,7 +127,7 @@ def train(epoch):
     correct = 0
     total = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader):
-        inputs, targets = inputs.to(device), targets.to(device)
+        inputs, targets = inputs.to(device_id), targets.to(device_id)
         optimizer.zero_grad()
         outputs = net(inputs)
         loss = criterion(outputs, targets)
@@ -125,7 +151,7 @@ def test(epoch):
     total = 0
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
-            inputs, targets = inputs.to(device), targets.to(device)
+            inputs, targets = inputs.to(device_id), targets.to(device_id)
             outputs = net(inputs)
             loss = criterion(outputs, targets)
 
@@ -153,10 +179,9 @@ def test(epoch):
 
 list_loss = []
 
-for epoch in range(start_epoch, start_epoch+50):
+for epoch in range(start_epoch, start_epoch+5):
     trainloss = train(epoch)
     test(epoch)
     
     list_loss.append(trainloss)
-    print(list_loss)
 print(list_loss)
