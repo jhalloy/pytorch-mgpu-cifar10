@@ -62,13 +62,12 @@ transform_test = transforms.Compose([
 ])
 
 trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=bs, shuffle=True, num_workers=8)
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=bs, shuffle=False, num_workers=8, sampler=DistributedSampler(trainset))
 
 testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
-testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=8)
+testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=8, sampler=DistributedSampler(testset))
 
 classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
-
 
 
 # Model
@@ -96,14 +95,11 @@ elif args.net=='res101':
 
 #net = net.to(device)
 if device == 'cuda':
-    dist.init_process_group("nccl")
-    rank = dist.get_rank()
+    ddp_setup(rank, 2);
     print(f"Start running basic DDP example on rank {rank}.")
     device_id = rank % torch.cuda.device_count()
     model = net.to(device_id);
-    ddp_model = DistributedDataParallel(model, device_ids=[device_id])
-    #dist.init_process_group("NCCL", rank=1, world_size=2)
-    #net = DistributedDataParallel(net) # make parallel
+    ddp_model = DDP(model, device_ids=[device_id])
     cudnn.benchmark = True
 
 if args.resume:
@@ -122,6 +118,7 @@ optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5
 # Training
 def train(epoch):
     print('\nEpoch: %d' % epoch)
+    train_loader.sampler.set_epoch(epoch)
     net.train()
     train_loss = 0
     correct = 0
@@ -168,13 +165,14 @@ def test(epoch):
     if acc > best_acc:
         print('Saving..')
         state = {
-            'net': net.state_dict(),
+            'net': net.module.state_dict(),
             'acc': acc,
             'epoch': epoch,
         }
         if not os.path.isdir('checkpoint'):
             os.mkdir('checkpoint')
-        torch.save(state, './checkpoint/'+args.net+'-ckpt.t7')
+        if device_id == 0:
+            torch.save(state, './checkpoint/'+args.net+'-ckpt.t7')
         best_acc = acc
 
 list_loss = []
